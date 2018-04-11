@@ -61,6 +61,50 @@ class DataReader(object):
         )
 
     def batch_generator(self, batch_size, df, shuffle=True, num_epochs=10000, is_test=False):
+        """
+        Randomly choose different x encoding lengths for each row of each batch.
+
+        Batch starts out looking like
+
+            [seq_1,
+             seq_2,
+             ...
+             seq_N]
+
+        where seq_n.shape = (full_seq_len,) and each seq represents a series of views for a given
+        page.
+
+        For each (n, seq_n) in enumberate(batch), we
+            1. Choose a random stopping point for encoding: x_encode_len
+            2. Let x_encode = seq_n[:x_encode_len]
+            3. Let encode_len[n] = x_encode_len, so that we know where encoding stops
+               and decoding starts
+            4. Let y_decode = seq_n[x_encode_len:x_encode_len + num_decode_steps]
+
+        For batch_size=4, num_decode_steps=3, and full_seq_len=9, the original sequences
+        are partitioned as
+
+            |e,e,e,d,d,d,-,-,-| -> encode_len = 3
+            |e,e,d,d,d,-,-,-,-| -> encode_len = 2
+            |e,e,e,e,d,d,d,-,-| -> encode_len = 4
+            |e,e,e,e,e,e,d,d,d| -> encode_len = 6
+
+        The x_encode batch looks like
+
+            |e,e,e,0,0,0,0,0,0|
+            |e,e,0,0,0,0,0,0,0|
+            |e,e,e,e,0,0,0,0,0|
+            |e,e,e,e,e,e,0,0,0|
+
+        The y_decode batch looks like
+
+            |d,d,d|
+            |d,d,d|
+            |d,d,d|
+            |d,d,d|
+
+        During training, we'll need to know where encoding stopped and decoding started
+        """
         batch_gen = df.batch_generator(
             batch_size=batch_size,
             shuffle=shuffle,
@@ -308,7 +352,9 @@ class cnn(TFBaseModel):
         for i, (conv_input, dilation) in enumerate(zip(conv_inputs, self.dilations)):
             """
             batch_idx.shape = (dilation*batch_size,)
-            batch_idx[n, :] = [n]*dilation
+
+            Before flattening:
+                batch_idx[n, :] = [n]*dilation
             """
             batch_idx = tf.range(batch_size)
             batch_idx = tf.tile(tf.expand_dims(batch_idx, 1), (1, dilation))
@@ -317,9 +363,11 @@ class cnn(TFBaseModel):
             """
             For each batch, temporal_idx gives us the indices of the last possible
             slice in time to which we can apply the dilation.
-            
+
             temporal_idx.shape = (dilation*batch_size,)
-            temporal_idx[n, :] = queue_begin_time[n] + np.arange(dilation)
+
+            Before flattening,
+                temporal_idx[n, :] = queue_begin_time[n] + np.arange(dilation)
             """
             queue_begin_time = self.encode_len - dilation - 1
             temporal_idx = tf.expand_dims(queue_begin_time, 1) + tf.expand_dims(tf.range(dilation), 0)
