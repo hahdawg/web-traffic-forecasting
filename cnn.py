@@ -177,15 +177,24 @@ class cnn(TFBaseModel):
 
         Returns
         -------
-        y_hat: projected skip outputs (thought vector)
+        y_hat: Tensor
+            projected skip outputs (thought vector)
             shape = [batch_size, seq_len, 1]
-        conv_inputs: convolutional layers
+        conv_inputs: [Tensor]
+            outputs of convolution
             length = len(dilations)
             each element has shape [batch_size, seq_len, residual_channels]
         """
+
+        # x.shape = [batch_size, seq_len, num_features + 1]
         x = tf.concat([x, features], axis=2)
 
-        # inputs.shape = [batch_size, seq_len, residual_channels]
+        """
+        Pass initial inputs through dense layer so that they'll have
+        the same shape as the residuals. We're expanding the number
+        of "channels", so this is like a strided convolution.
+        inputs.shape = [batch_size, seq_len, residual_channels]
+        """
         inputs = time_distributed_dense_layer(
             inputs=x,
             output_units=self.residual_channels,
@@ -196,6 +205,7 @@ class cnn(TFBaseModel):
         skip_outputs = []
         conv_inputs = [inputs]
         for i, (dilation, filter_width) in enumerate(zip(self.dilations, self.filter_widths)):
+
             # dilated_conv.shape = [batch_size, seq_len, 2*residual_channels]
             dilated_conv = temporal_convolution_layer(
                 inputs=inputs,
@@ -210,6 +220,8 @@ class cnn(TFBaseModel):
             conv_filter, conv_gate = tf.split(dilated_conv, 2, axis=2)
             dilated_conv = tf.nn.tanh(conv_filter)*tf.nn.sigmoid(conv_gate)
 
+            # Pass dilated_conv through dense layer to expand the number of channels.
+            # This is like a strided convolution.
             # outputs.shape = [batch_size, seq_len, skip_channels + residual_channels]
             outputs = time_distributed_dense_layer(
                 inputs=dilated_conv,
@@ -247,7 +259,6 @@ class cnn(TFBaseModel):
         )
 
         skip_outputs = []
-        # conv_inputs = [inputs]
         for i, (dilation, filter_width) in enumerate(zip(self.dilations, self.filter_widths)):
             dilated_conv = temporal_convolution_layer(
                 inputs=inputs,
@@ -268,7 +279,6 @@ class cnn(TFBaseModel):
             skips, residuals = tf.split(outputs, [self.skip_channels, self.residual_channels], axis=2)
 
             inputs += residuals
-            # conv_inputs.append(inputs)
             skip_outputs.append(skips)
 
         skip_outputs = tf.nn.relu(tf.concat(skip_outputs, axis=2))
@@ -297,6 +307,7 @@ class cnn(TFBaseModel):
         state_queues = []
         for i, (conv_input, dilation) in enumerate(zip(conv_inputs, self.dilations)):
             """
+            batch_idx.shape = (dilation*batch_size,)
             batch_idx[n, :] = [n]*dilation
             """
             batch_idx = tf.range(batch_size)
@@ -306,7 +317,8 @@ class cnn(TFBaseModel):
             """
             For each batch, temporal_idx gives us the indices of the last possible
             slice in time to which we can apply the dilation.
-
+            
+            temporal_idx.shape = (dilation*batch_size,)
             temporal_idx[n, :] = queue_begin_time[n] + np.arange(dilation)
             """
             queue_begin_time = self.encode_len - dilation - 1
@@ -324,7 +336,7 @@ class cnn(TFBaseModel):
             slices = tf.reshape(tf.gather_nd(conv_input, idx), (batch_size, dilation, shape(conv_input, 2)))
 
             """
-            layer_ta is like a time-series of convolution inputs.
+            layer_ta is a time-series of convolution inputs.
 
             layer_ta.read(0).shape = [batch_size, tf.shape(conv_input)[2]]
             """
@@ -384,7 +396,7 @@ class cnn(TFBaseModel):
                 x_proj = tf.nn.tanh(tf.matmul(current_input, w_x_proj) + b_x_proj)
 
             skip_outputs, updated_queues = [], []
-            for i, (conv_input, queue, dilation) in enumerate(zip(conv_inputs, queues, self.dilations)):
+            for i, (queue, dilation) in enumerate(zip(conv_inputs, queues, self.dilations)):
                 """
                 state.shape = [batch_size, skip_channels]
                 """
