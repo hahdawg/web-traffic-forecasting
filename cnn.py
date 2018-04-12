@@ -237,6 +237,7 @@ class cnn(TFBaseModel):
         Pass initial inputs through dense layer so that they'll have
         the same shape as the residuals. We're expanding the number
         of "channels", so this is like a strided convolution.
+
         inputs.shape = [batch_size, seq_len, residual_channels]
         """
         inputs = time_distributed_dense_layer(
@@ -351,9 +352,14 @@ class cnn(TFBaseModel):
         state_queues = []
         for i, (conv_input, dilation) in enumerate(zip(conv_inputs, self.dilations)):
             """
+            conv_input.shape = [batch_size, seq_len, residual_channels]
+            """
+
+            """
             batch_idx.shape = (dilation*batch_size,)
 
             Before flattening:
+                batch_idx.shape = [batch_size, dilation]
                 batch_idx[n, :] = [n]*dilation
             """
             batch_idx = tf.range(batch_size)
@@ -367,6 +373,7 @@ class cnn(TFBaseModel):
             temporal_idx.shape = (dilation*batch_size,)
 
             Before flattening,
+                temporal_idx.shape = [batch_size, dilation]
                 temporal_idx[n, :] = queue_begin_time[n] + np.arange(dilation)
             """
             queue_begin_time = self.encode_len - dilation - 1
