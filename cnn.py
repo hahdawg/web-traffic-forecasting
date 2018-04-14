@@ -400,6 +400,7 @@ class cnn(TFBaseModel):
             state_queues.append(layer_ta)
 
         # initialize feature tensor array
+        # features_ta.read(0).shape = [batch_size, num_features]
         features_ta = tf.TensorArray(dtype=tf.float32, size=self.num_decode_steps)
         features_ta = features_ta.unstack(tf.transpose(features, (1, 0, 2)))
 
@@ -459,6 +460,21 @@ class cnn(TFBaseModel):
 
                 with tf.variable_scope('dilated-conv-decode-{}'.format(i), reuse=True):
                     """
+                    Our convolution_width is 2. Suppose all the inputs and outputs are 1D.
+                    For any given time t and dilation d, the convolution will be as follows:
+
+                        conv[t] = filter[0]*y[t - d] + filter[1]*y[t]
+
+                    Note
+
+                        y[t - d] = convolutional output from encoder if t < d
+                        y[t - d] = decoder forecast for time t - d if t >= d
+
+                    And
+
+                        y[t] = projected skip outputs from encoder if t = 0
+                        y[t] = decoder forecast for time t if t > 0
+
                     w_conv.shape = [convolution_width, residual_channels, output_units]
                     dilated_conv.shape = [batch_size, 2*residual_channels]
                     """
