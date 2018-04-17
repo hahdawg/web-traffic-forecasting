@@ -236,7 +236,7 @@ class cnn(TFBaseModel):
         """
         Pass initial inputs through dense layer so that they'll have
         the same shape as the residuals. We're expanding the number
-        of "channels", so this is like a strided convolution.
+        of "channels".
 
         inputs.shape = [batch_size, seq_len, residual_channels]
         """
@@ -266,7 +266,6 @@ class cnn(TFBaseModel):
             dilated_conv = tf.nn.tanh(conv_filter)*tf.nn.sigmoid(conv_gate)
 
             # Pass dilated_conv through dense layer to expand the number of channels.
-            # This is like a strided convolution.
             # outputs.shape = [batch_size, seq_len, skip_channels + residual_channels]
             outputs = time_distributed_dense_layer(
                 inputs=dilated_conv,
@@ -345,6 +344,7 @@ class cnn(TFBaseModel):
 
         Returns
         -------
+
         """
         batch_size = tf.shape(x)[0]
 
@@ -384,6 +384,16 @@ class cnn(TFBaseModel):
             For each batch, idx tells us which temporal indices to grab for conv_input.
             idx.shape = [batch_size, 2]
 
+            For dilation = 2, idx looks like
+
+                | batch_idx_1, temporal_idx_1 |
+                | batch_idx_1, temporal_idx_2 |
+                | batch_idx_2, temporal_idx_3 |
+                | batch_idx_2, temporal_idx_4 |
+                            ...
+                | batch_idx_n, temporal_idx_m |
+                | batch_idx_n, temporal_idx_m |
+
             For each batch, slices represents chunks of conv_input we'll feed to the decoder's convolution.
             slices.shape = [batch_size, dilation, tf.shape(conv_input, 2)]
             """
@@ -391,12 +401,16 @@ class cnn(TFBaseModel):
             slices = tf.reshape(tf.gather_nd(conv_input, idx), (batch_size, dilation, shape(conv_input, 2)))
 
             """
-            layer_ta is a time-series of convolution inputs.
+            layer_ta is a time-series of convolution outputs/inputs.
 
             layer_ta.read(0).shape = [batch_size, tf.shape(conv_input)[2]]
             """
             layer_ta = tf.TensorArray(dtype=tf.float32, size=dilation + self.num_decode_steps)
             layer_ta = layer_ta.unstack(tf.transpose(slices, (1, 0, 2)))
+
+            """
+            state_queues will contain convolution outputs/inputs for a layer
+            """
             state_queues.append(layer_ta)
 
         # initialize feature tensor array
@@ -427,7 +441,8 @@ class cnn(TFBaseModel):
                 if t == 0, current_input = thought_vector from encoder
                 if t > 0, current_input = forecast from previous time step
                 shape = [batch_size, 1]
-            queues: encoder convolutions
+            queues: [layer_ta]
+                Convolution outputs computed before time input
 
             Returns
             -------
@@ -452,7 +467,7 @@ class cnn(TFBaseModel):
                 x_proj = tf.nn.tanh(tf.matmul(current_input, w_x_proj) + b_x_proj)
 
             skip_outputs, updated_queues = [], []
-            for i, (queue, dilation) in enumerate(zip(conv_inputs, queues, self.dilations)):
+            for i, (queue, dilation) in enumerate(zip(queues, self.dilations)):
                 """
                 state.shape = [batch_size, skip_channels]
                 """
@@ -463,17 +478,16 @@ class cnn(TFBaseModel):
                     Our convolution_width is 2. Suppose all the inputs and outputs are 1D.
                     For any given time t and dilation d, the convolution will be as follows:
 
-                        conv[t] = filter[0]*y[t - d] + filter[1]*y[t]
+                        conv[t] = state[t]*filter[0] + x[t]*filter[1]
 
-                    Note
+                    where
 
-                        y[t - d] = convolutional output from encoder if t < d
-                        y[t - d] = decoder forecast for time t - d if t >= d
+                        state[t] = resid output from encoder if t <= d
+                                 = resid output from decoder if t > d
 
-                    And
+                    and
 
-                        y[t] = projected skip outputs from encoder if t = 0
-                        y[t] = decoder forecast for time t if t > 0
+                        x[t] = x_proj[t]
 
                     w_conv.shape = [convolution_width, residual_channels, output_units]
                     dilated_conv.shape = [batch_size, 2*residual_channels]
@@ -481,6 +495,7 @@ class cnn(TFBaseModel):
                     w_conv = tf.get_variable('weights')
                     b_conv = tf.get_variable('biases')
                     dilated_conv = tf.matmul(state, w_conv[0, :, :]) + tf.matmul(x_proj, w_conv[1, :, :]) + b_conv
+
                 conv_filter, conv_gate = tf.split(dilated_conv, 2, axis=1)
                 dilated_conv = tf.nn.tanh(conv_filter)*tf.nn.sigmoid(conv_gate)
 
@@ -492,6 +507,16 @@ class cnn(TFBaseModel):
 
                 x_proj += residuals
                 skip_outputs.append(skips)
+
+                """
+                For a given batch, say dilation = 4. Suppose the unflattened temporal_idx
+                looks like [96, 97, 98, 99] for this batch. The first time we call loop_fn,
+                time = 96. So, we're calculating resid values for
+
+                    time = time + dilation = 100
+
+                As a result, we want to write our calculations to to time + dilation.
+                """
                 updated_queues.append(queue.write(time + dilation, x_proj))
 
             skip_outputs = tf.nn.relu(tf.concat(skip_outputs, axis=1))
